@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --grid-color: rgba(30, 27, 24, 0.08);
+}
+
+body {
+  font-family: var(--font-heading), sans-serif;
+  background:
+    radial-gradient(circle at 10% 15%, rgba(93, 169, 233, 0.18), transparent 26%),
+    radial-gradient(circle at 85% 20%, rgba(199, 92, 52, 0.15), transparent 28%),
+    linear-gradient(135deg, #f4efe7 0%, #efe4d2 55%, #f4efe7 100%);
+}
+
+.panel-grid {
+  background-image:
+    linear-gradient(to right, var(--grid-color) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-color) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
