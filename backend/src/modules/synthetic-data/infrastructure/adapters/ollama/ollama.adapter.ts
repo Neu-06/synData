@@ -33,6 +33,7 @@ export class OllamaAdapter implements ILanguageModelProvider {
     region: string,
   ): Promise<ContextPoolDictionary> {
     try {
+      // Primer intento con prompt principal; si falla el formato, se fuerza un segundo intento.
       const firstAttemptRaw = await this.requestToOllama(
         this.buildPrompt(schema, region),
         this.buildSystemPrompt(region),
@@ -61,6 +62,7 @@ export class OllamaAdapter implements ILanguageModelProvider {
           return this.parseAndValidateLLMResponse(retryRaw);
         } catch (retryParseError: unknown) {
           if (retryParseError instanceof LlmResponseParseError) {
+            // Degradación controlada: la generación continúa sin contexto IA.
             this.logger.warn(
               `El reintento tambien fallo al parsear la respuesta del modelo: ${retryParseError.message}. Se continuara sin contexto IA.`,
             );
@@ -309,6 +311,7 @@ export class OllamaAdapter implements ILanguageModelProvider {
         continue;
       }
 
+      // Se aceptan únicamente colecciones string[] para simplificar su uso en generación.
       if (!Array.isArray(rawValue)) {
         this.logger.warn(
           `Categoria ignorada porque no es arreglo: ${rawKey}`,

@@ -53,6 +53,7 @@ export class ProcessSqlUploadUseCase {
       throw new BadRequestException('region es obligatoria.');
     }
 
+    // Flujo principal: extraer esquema, construir contexto semántico y generar dataset consistente.
     const schema = await this.sqlSchemaExtractor.extractFromSql(
       sqlContent,
       command.dialect,
@@ -90,6 +91,7 @@ export class ProcessSqlUploadUseCase {
   }
 
   private toSqlScript(data: SyntheticPreview): string {
+    // Se serializa por tabla y columnas detectadas para mantener consistencia entre filas.
     const statements: string[] = [];
 
     for (const [tableName, rows] of Object.entries(data)) {

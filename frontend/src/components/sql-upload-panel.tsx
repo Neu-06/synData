@@ -54,6 +54,7 @@ export function SqlUploadPanel() {
       return;
     }
 
+    // Se fuerza un entero dentro de límites para mantener contrato con backend.
     const normalized = Math.min(
       MAX_ROW_COUNT,
       Math.max(MIN_ROW_COUNT, Math.trunc(parsed)),
@@ -99,6 +100,7 @@ export function SqlUploadPanel() {
       formData.append('outputFormat', outputFormat);
 
       const controller = new AbortController();
+      // Timeout defensivo para evitar solicitudes colgadas en cargas pesadas.
       const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try {
@@ -126,6 +128,7 @@ export function SqlUploadPanel() {
           outputFormat,
         );
 
+        // Descarga programática del archivo generado sin recargar la página.
         const downloadUrl = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = downloadUrl;
@@ -272,6 +275,7 @@ function resolveFileName(
   contentDisposition: string | null,
   outputFormat: OutputFormat,
 ): string {
+  // Si el backend no envía filename, se usa un nombre de respaldo coherente con el formato.
   if (typeof contentDisposition === 'string') {
     const match = contentDisposition.match(/filename="?([^";]+)"?/i);
     if (match && typeof match[1] === 'string' && match[1].trim().length > 0) {

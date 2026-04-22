@@ -29,6 +29,7 @@ export class FakerGenerationService {
     contextPools: ContextPoolDictionary,
     region: string,
   ): SyntheticPreview {
+    // El locale se fija por solicitud para mantener coherencia cultural en nombres y ubicaciones.
     this.activeFaker = this.resolveFakerByRegion(region);
 
     const orderedTables = this.sortByDependencies(schema);
@@ -90,6 +91,7 @@ export class FakerGenerationService {
       }
 
       if (!progress) {
+        // Si hay ciclos entre tablas, se procesa el remanente para evitar bloqueo infinito.
         for (const table of pending.values()) {
           ordered.push(table);
         }
@@ -114,10 +116,12 @@ export class FakerGenerationService {
     const normalizedName = this.normalize(column.name);
     const normalizedType = this.normalize(column.dataType);
 
+    // Las PK enteras se generan de forma determinista por fila para facilitar trazabilidad.
     if (column.isPrimaryKey && this.isIntegerLikeColumn(normalizedName, normalizedType)) {
       return rowIndex + 1;
     }
 
+    // Las FK siempre priorizan valores ya generados en la tabla referenciada.
     if (column.reference) {
       const referenceValue = this.resolveForeignKeyValue(column, generated, rowIndex);
       return this.ensureUniqueIfNeeded(
@@ -138,6 +142,7 @@ export class FakerGenerationService {
 
     let candidate: PrimitiveValue;
 
+    // Si existe DEFAULT en esquema, se reutiliza en una fracción de casos para simular datos reales.
     if (
       typeof column.defaultValue !== 'undefined' &&
       this.activeFaker.number.int({ min: 1, max: 100 }) <= 18
@@ -163,6 +168,7 @@ export class FakerGenerationService {
       candidate = this.activeFaker.lorem.word();
     }
 
+    // Normaliza el valor final para cumplir tipo SQL y restricciones declaradas.
     candidate = this.applyTypeAndConstraintCoercion(candidate, column, normalizedType);
 
     if (candidate === null && !column.nullable) {
@@ -194,6 +200,7 @@ export class FakerGenerationService {
       Array.isArray(values) && values.length > 0,
     );
 
+    // Se intenta primero un match exacto tabla.columna para evitar contaminación semántica.
     const exactMatches = candidates.filter(([key]) => {
       const normalizedKey = this.normalize(key);
       return (
@@ -549,6 +556,7 @@ export class FakerGenerationService {
 
     let candidate: PrimitiveValue = value;
 
+    // Se limita el número de intentos para mantener latencia estable con volúmenes altos.
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const token = this.buildUniquenessToken(candidate);
       if (!usedValues.has(token)) {
@@ -762,6 +770,7 @@ export class FakerGenerationService {
 
     candidate = Number(candidate.toFixed(scale));
 
+    // Aplica el rango máximo representable por PRECISION/SCALE.
     if (typeof column.numericPrecision === 'number') {
       const precision = Math.max(1, Math.trunc(column.numericPrecision));
       const integerDigits = Math.max(1, precision - scale);

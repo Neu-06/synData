@@ -62,6 +62,7 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
   }
 
   private cleanSqlString(sql: string): string {
+    // Se eliminan comentarios y sentencias no estructurales para estabilizar el parseo AST.
     const withoutComments = sql
       .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .replace(/--[^\r\n]*/g, ' ');
@@ -129,6 +130,7 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
     const definitionNode = this.asRecord(definitionRecord.definition);
     const nullableNode = this.asRecord(definitionRecord.nullable);
 
+    // La librería puede anidar el nombre de columna en varios niveles según dialecto.
     const name = this.extractColumnName(rawColumn) ?? null;
     if (!name) {
       return null;
@@ -204,6 +206,7 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
       }
 
       if (constraintType === 'unique') {
+        // Un UNIQUE compuesto no implica unicidad individual por columna.
         if (sourceColumns.length !== 1) {
           continue;
         }
@@ -311,6 +314,7 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
   }
 
   private parseDefaultValue(defaultNode: unknown): PrimitiveValue | undefined {
+    // Convierte defaults del AST a primitivos del dominio para reutilizarlos en generación.
     const defaultRecord = this.asRecord(defaultNode);
     if (!defaultRecord) {
       return undefined;
