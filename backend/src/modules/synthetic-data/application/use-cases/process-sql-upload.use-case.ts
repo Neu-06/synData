@@ -65,6 +65,7 @@ export class ProcessSqlUploadUseCase {
       schema,
       command.rowCount,
       contextPools,
+      normalizedRegion,
     );
 
     const baseName = this.fileNameWithoutExtension(command.fileName);

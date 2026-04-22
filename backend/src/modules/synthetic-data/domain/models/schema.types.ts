@@ -8,6 +8,11 @@ export interface ColumnSchema {
   dataType: string;
   nullable: boolean;
   isPrimaryKey: boolean;
+  isUnique: boolean;
+  maxLength?: number;
+  numericPrecision?: number;
+  numericScale?: number;
+  defaultValue?: PrimitiveValue;
   reference?: ColumnReference;
 }
 

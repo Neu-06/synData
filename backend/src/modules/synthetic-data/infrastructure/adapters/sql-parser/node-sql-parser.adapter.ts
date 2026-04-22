@@ -1,6 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { Parser } from 'node-sql-parser';
-import { ColumnSchema, SchemaGraph, TableSchema } from '../../../domain/models/schema.types';
+import {
+  ColumnSchema,
+  PrimitiveValue,
+  SchemaGraph,
+  TableSchema,
+} from '../../../domain/models/schema.types';
 import {
   ISqlSchemaExtractor,
   SqlDialect,
@@ -101,7 +106,7 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
       .map((definition) => this.mapColumnFromCreateDefinition(definition))
       .filter((column): column is ColumnSchema => column !== null);
 
-    this.applyForeignKeyConstraints(columns, definitions);
+    this.applyConstraintMetadata(columns, definitions);
 
     return {
       name: tableName,
@@ -115,22 +120,16 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
       return null;
     }
 
-    const rawColumn = definitionRecord.column;
-    const columnNode = this.asRecord(rawColumn);
-    const nestedColumnNode = this.asRecord(columnNode?.column);
-    const columnExprNode = this.asRecord(columnNode?.expr);
-    const nestedColumnExprNode = this.asRecord(nestedColumnNode?.expr);
-    const definitionNode = this.asRecord(definitionRecord.definition);
-    const nullableNode = this.asRecord(definitionNode?.nullable);
+    const resourceType = this.asString(definitionRecord.resource)?.toLowerCase();
+    if (resourceType !== 'column') {
+      return null;
+    }
 
-    const name =
-      this.asString(columnNode?.column) ??
-      this.asString(nestedColumnNode?.column) ??
-      this.asString(nestedColumnExprNode?.value) ??
-      this.asString(rawColumn) ??
-      this.asString(columnExprNode?.column) ??
-      this.asString(columnExprNode?.value) ??
-      null;
+    const rawColumn = definitionRecord.column;
+    const definitionNode = this.asRecord(definitionRecord.definition);
+    const nullableNode = this.asRecord(definitionRecord.nullable);
+
+    const name = this.extractColumnName(rawColumn) ?? null;
     if (!name) {
       return null;
     }
@@ -141,16 +140,30 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
       this.asString(this.asRecord(rawDataType)?.dataType) ??
       this.asString(this.asRecord(rawDataType)?.value) ??
       'varchar';
-    const nullable = this.asString(nullableNode?.type) !== 'not null';
-    const isPrimaryKey = Boolean(definitionNode?.primary_key);
+    const normalizedDataType = dataType.toLowerCase();
+    const maxLength = this.asNumber(definitionNode?.length);
+    const numericPrecision = this.isNumericType(normalizedDataType)
+      ? maxLength
+      : undefined;
+    const numericScale = this.asNumber(definitionNode?.scale);
+    const nullable = this.asString(nullableNode?.type)?.toLowerCase() !== 'not null';
+    const isPrimaryKey = this.asTruthyBoolean(definitionRecord.primary_key);
+    const isUnique =
+      this.asTruthyBoolean(definitionRecord.unique) || isPrimaryKey;
 
-    const inlineReference = this.parseReference(definitionNode?.reference_definition);
+    const inlineReference = this.parseReference(definitionRecord.reference_definition);
+    const defaultValue = this.parseDefaultValue(definitionRecord.default_val);
 
     return {
       name,
       dataType,
-      nullable,
+      nullable: isPrimaryKey ? false : nullable,
       isPrimaryKey,
+      isUnique,
+      ...(typeof maxLength === 'number' ? { maxLength } : {}),
+      ...(typeof numericPrecision === 'number' ? { numericPrecision } : {}),
+      ...(typeof numericScale === 'number' ? { numericScale } : {}),
+      ...(typeof defaultValue !== 'undefined' ? { defaultValue } : {}),
       ...(inlineReference
         ? {
             reference: {
@@ -162,23 +175,54 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
     };
   }
 
-  private applyForeignKeyConstraints(columns: ColumnSchema[], definitions: unknown[]): void {
+  private applyConstraintMetadata(columns: ColumnSchema[], definitions: unknown[]): void {
     for (const definition of definitions) {
-      if (typeof definition !== 'object' || definition === null) {
+      const constraint = this.asRecord(definition) as ConstraintDefinition | undefined;
+      if (!constraint) {
         continue;
       }
 
-      const constraint = definition as ConstraintDefinition;
-      if (constraint.resource !== 'constraint') {
+      if (this.asString(constraint.resource)?.toLowerCase() !== 'constraint') {
         continue;
       }
 
       const constraintType = this.asString(constraint.constraint_type)?.toLowerCase();
+      const sourceColumns = this.extractColumnNames(constraint.definition);
+
+      if (constraintType === 'primary key') {
+        sourceColumns.forEach((sourceColumn) => {
+          const column = columns.find((item) => item.name === sourceColumn);
+          if (!column) {
+            return;
+          }
+
+          column.isPrimaryKey = true;
+          column.isUnique = true;
+          column.nullable = false;
+        });
+        continue;
+      }
+
+      if (constraintType === 'unique') {
+        if (sourceColumns.length !== 1) {
+          continue;
+        }
+
+        sourceColumns.forEach((sourceColumn) => {
+          const column = columns.find((item) => item.name === sourceColumn);
+          if (!column) {
+            return;
+          }
+
+          column.isUnique = true;
+        });
+        continue;
+      }
+
       if (constraintType !== 'foreign key') {
         continue;
       }
 
-      const sourceColumns = this.extractColumnNames(constraint.definition);
       const targetReference = this.parseReference(constraint.reference_definition);
 
       if (!targetReference) {
@@ -205,9 +249,7 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
       return undefined;
     }
 
-    const tableNode = referenceNode.table;
-    const tableName =
-      this.asString(tableNode) ?? this.asString(this.asRecord(tableNode)?.table) ?? undefined;
+    const tableName = this.extractTableName(referenceNode.table);
 
     if (!tableName) {
       return undefined;
@@ -224,7 +266,8 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
   private extractTableName(tableNode: unknown): string | undefined {
     if (Array.isArray(tableNode)) {
       const firstTable = tableNode[0];
-      return this.asString(this.asRecord(firstTable)?.table);
+      const firstTableNode = this.asRecord(firstTable);
+      return this.asString(firstTableNode?.table) ?? this.asString(firstTable);
     }
 
     return this.asString(this.asRecord(tableNode)?.table) ?? this.asString(tableNode);
@@ -236,11 +279,119 @@ export class NodeSqlParserAdapter implements ISqlSchemaExtractor {
     }
 
     return columnsNode
-      .map((column) => {
-        const rawColumn = this.asRecord(column);
-        return this.asString(rawColumn?.column) ?? this.asString(column);
-      })
+      .map((column) => this.extractColumnName(column))
       .filter((columnName): columnName is string => typeof columnName === 'string');
+  }
+
+  private extractColumnName(columnNode: unknown): string | undefined {
+    const columnRecord = this.asRecord(columnNode);
+    if (!columnRecord) {
+      return this.asString(columnNode);
+    }
+
+    const directColumnName = this.asString(columnRecord.column);
+    if (directColumnName) {
+      return directColumnName;
+    }
+
+    const nestedColumnNode = this.asRecord(columnRecord.column);
+    const nestedColumnExpr = this.asRecord(nestedColumnNode?.expr);
+    const nestedValue = this.asString(nestedColumnExpr?.value);
+    if (nestedValue) {
+      return nestedValue;
+    }
+
+    const directExprNode = this.asRecord(columnRecord.expr);
+    const directExprValue = this.asString(directExprNode?.value);
+    if (directExprValue) {
+      return directExprValue;
+    }
+
+    return this.asString(columnRecord.value);
+  }
+
+  private parseDefaultValue(defaultNode: unknown): PrimitiveValue | undefined {
+    const defaultRecord = this.asRecord(defaultNode);
+    if (!defaultRecord) {
+      return undefined;
+    }
+
+    const rawValue = defaultRecord.value;
+    if (rawValue === null) {
+      return null;
+    }
+
+    if (
+      typeof rawValue === 'string' ||
+      typeof rawValue === 'number' ||
+      typeof rawValue === 'boolean'
+    ) {
+      return rawValue;
+    }
+
+    const valueNode = this.asRecord(rawValue);
+    if (!valueNode) {
+      return undefined;
+    }
+
+    const valueType = this.asString(valueNode.type)?.toLowerCase();
+    const value = valueNode.value;
+
+    if (valueType === 'null') {
+      return null;
+    }
+
+    if (valueType === 'bool' && typeof value === 'boolean') {
+      return value;
+    }
+
+    if (valueType === 'number' && typeof value === 'number') {
+      return value;
+    }
+
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return value;
+    }
+
+    return undefined;
+  }
+
+  private isNumericType(normalizedDataType: string): boolean {
+    return (
+      normalizedDataType.includes('numeric') ||
+      normalizedDataType.includes('decimal') ||
+      normalizedDataType.includes('float') ||
+      normalizedDataType.includes('double') ||
+      normalizedDataType.includes('real')
+    );
+  }
+
+  private asTruthyBoolean(value: unknown): boolean {
+    if (typeof value === 'boolean') {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      return normalized.length > 0 && normalized !== 'false';
+    }
+
+    return Boolean(value);
+  }
+
+  private asNumber(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+
+    return undefined;
   }
 
   private asRecord(value: unknown): Record<string, unknown> | undefined {

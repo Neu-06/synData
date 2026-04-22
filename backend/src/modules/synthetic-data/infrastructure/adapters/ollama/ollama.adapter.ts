@@ -2,7 +2,6 @@ import {
   InternalServerErrorException,
   Injectable,
   Logger,
-  RequestTimeoutException,
 } from '@nestjs/common';
 import { SchemaGraph } from '../../../domain/models/schema.types';
 import {
@@ -62,13 +61,10 @@ export class OllamaAdapter implements ILanguageModelProvider {
           return this.parseAndValidateLLMResponse(retryRaw);
         } catch (retryParseError: unknown) {
           if (retryParseError instanceof LlmResponseParseError) {
-            this.logger.error(
-              `El reintento tambien fallo al parsear la respuesta del modelo: ${retryParseError.message}`,
-              retryParseError.stack,
+            this.logger.warn(
+              `El reintento tambien fallo al parsear la respuesta del modelo: ${retryParseError.message}. Se continuara sin contexto IA.`,
             );
-            throw new InternalServerErrorException(
-              'No fue posible obtener un arreglo JSON valido desde el modelo despues del reintento.',
-            );
+            return {};
           }
 
           throw retryParseError;
@@ -76,21 +72,23 @@ export class OllamaAdapter implements ILanguageModelProvider {
       }
     } catch (error: unknown) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new RequestTimeoutException(
-          'Tiempo de espera agotado al consultar Ollama.',
+        this.logger.warn(
+          'Tiempo de espera agotado al consultar Ollama. Se continuara sin contexto IA.',
         );
+        return {};
       }
 
-      if (
-        error instanceof InternalServerErrorException ||
-        error instanceof RequestTimeoutException
-      ) {
-        throw error;
+      if (error instanceof InternalServerErrorException) {
+        this.logger.warn(
+          `No fue posible generar contexto con Ollama (${error.message}). Se continuara sin contexto IA.`,
+        );
+        return {};
       }
 
-      throw new InternalServerErrorException(
-        `No fue posible generar semillas con Ollama: ${error instanceof Error ? error.message : String(error)}`,
+      this.logger.error(
+        `Fallo no controlado al generar contexto con Ollama. Se continuara sin contexto IA. Motivo: ${error instanceof Error ? error.message : String(error)}`,
       );
+      return {};
     }
   }
 
@@ -155,10 +153,12 @@ export class OllamaAdapter implements ILanguageModelProvider {
 
   private buildSystemPrompt(region: string): string {
     return [
-      'Actua como un analista de datos.',
-      'Debes devolver exclusivamente un objeto JSON valido.',
+      'Actua como experto en datos semilla para bases SQL empresariales.',
+      'Debes responder exclusivamente un objeto JSON valido.',
       'No uses markdown, no saludes, no expliques.',
-      'No inventes categorias para columnas que no existen en el esquema.',
+      'Las claves del objeto deben tener formato tabla.columna.',
+      'Solo incluye columnas textuales o semanticas (nombres, categorias, ciudades, zonas, descripcion, etc.).',
+      'No incluyas ids, llaves foraneas, numericos, fechas ni booleanos.',
       `Region objetivo: ${region}.`,
     ].join('\n');
   }
@@ -167,18 +167,23 @@ export class OllamaAdapter implements ILanguageModelProvider {
     const esquemaParseado = this.buildSchemaParseado(schema);
 
     return [
-      `Actua como un analista de datos. Revisa este esquema SQL:`,
+      'Analiza el siguiente esquema SQL parseado:',
       esquemaParseado,
-      `Basado en las columnas reales, identifica que categorias de datos semanticos necesitas (por ejemplo, si ves ciudad necesitas un array de ciudades; si ves razon_social necesitas un array de empresas).`,
-      `Genera un diccionario JSON con arreglos de 15 ejemplos altamente realistas para la region: ${region}.`,
-      'No inventes categorias para columnas que no existen.',
+      `Genera un diccionario JSON para la region ${region}.`,
+      'Reglas obligatorias:',
+      '1) Usa unicamente claves con formato tabla.columna que existan en el esquema.',
+      '2) Incluye solo columnas textuales/semanticas (evita id, fk, numericos, fecha, boolean).',
+      '3) Cada clave debe tener un string[] de 25 valores realistas y variados.',
+      '4) Respeta el contexto de tabla (ejemplo: productos.nombre debe ser nombre de producto, no persona).',
+      '5) No agregues texto fuera del JSON.',
       '',
       'EJEMPLO ESPERADO:',
       '{',
-      '  "nombres_personas": ["Carlos Perez", "Ana Gomez", "Luis Rojas"],',
-      '  "nombres_empresas": ["Tech Corp", "Logistica Sur", "AgroAndes"],',
-      '  "ciudades": ["Santa Cruz", "Lima", "Bogota"],',
-      '  "categorias_productos": ["Electronica", "Abarrotes", "Ferreteria"]',
+      '  "categorias.nombre": ["Electronica", "Ferreteria", "Abarrotes"],',
+      '  "productos.nombre": ["Taladro Inalambrico", "Arroz Premium", "Mouse Ergonomico"],',
+      '  "vendedores.nombres": ["Carlos", "Ana", "Luis"],',
+      '  "vendedores.apellidos": ["Rojas", "Perez", "Gomez"],',
+      '  "vendedores.zona": ["Zona Norte", "Zona Centro", "Zona Sur"]',
       '}',
     ].join('\n');
   }
@@ -193,7 +198,35 @@ export class OllamaAdapter implements ILanguageModelProvider {
           }
 
           const dataType = column.dataType?.trim().toUpperCase() ?? 'UNKNOWN';
-          return `${columnName} (${dataType})`;
+          const constraints: string[] = [];
+
+          if (column.isPrimaryKey) {
+            constraints.push('PK');
+          }
+
+          if (column.isUnique) {
+            constraints.push('UNIQUE');
+          }
+
+          if (!column.nullable) {
+            constraints.push('NOT_NULL');
+          }
+
+          if (typeof column.maxLength === 'number') {
+            constraints.push(`MAX_LEN=${column.maxLength}`);
+          }
+
+          if (typeof column.numericPrecision === 'number') {
+            constraints.push(
+              `PREC=${column.numericPrecision}${typeof column.numericScale === 'number' ? ` SCALE=${column.numericScale}` : ''}`,
+            );
+          }
+
+          if (column.reference) {
+            constraints.push(`FK=${column.reference.table}.${column.reference.column}`);
+          }
+
+          return `${columnName} (${dataType})${constraints.length > 0 ? ` [${constraints.join(' | ')}]` : ''}`;
         })
         .filter((columnSummary): columnSummary is string =>
           Boolean(columnSummary),
@@ -221,6 +254,8 @@ export class OllamaAdapter implements ILanguageModelProvider {
       'Tu salida anterior no fue parseable como objeto JSON valido.',
       'Corrige el formato y responde nuevamente.',
       'Responde SOLO con un objeto JSON valido con valores string[].',
+      'Las claves deben ser tabla.columna existentes en el esquema.',
+      'No incluyas columnas numericas/booleanas/fecha/id/fk.',
       'No uses markdown. No agregues texto antes ni despues.',
       'Salida invalida previa:',
       invalidResponse,
